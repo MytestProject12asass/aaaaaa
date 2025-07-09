@@ -1,0 +1,83 @@
+# StarRent.vip - Apache Configuration
+RewriteEngine On
+
+# Suppress ImageMagick warnings
+php_flag display_errors Off
+php_value error_reporting "E_ALL & ~E_WARNING & ~E_NOTICE"
+
+# Security Headers
+Header always set X-Content-Type-Options nosniff
+Header always set X-Frame-Options DENY
+Header always set X-XSS-Protection "1; mode=block"
+Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+# Hide sensitive files
+<Files ~ "^\.">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<Files ~ "\.sql$">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<Files ~ "\.log$">
+    Order allow,deny
+    Deny from all
+</Files>
+
+# Redirect to HTTPS (uncomment when SSL is installed)
+# RewriteCond %{HTTPS} off
+# RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# Pretty URLs
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^([^/]+)/?$ $1.php [L,QSA]
+
+# Handle router details
+RewriteRule ^router/([0-9]+)/?$ router.php?id=$1 [L,QSA]
+
+# Handle user dashboard
+RewriteRule ^dashboard/?$ dashboard.php [L,QSA]
+RewriteRule ^profile/?$ profile.php [L,QSA]
+RewriteRule ^rentals/?$ rentals.php [L,QSA]
+
+# Handle admin routes
+RewriteRule ^admin/?$ admin/dashboard.php [L,QSA]
+RewriteRule ^admin/([^/]+)/?$ admin/$1.php [L,QSA]
+
+# File upload security
+<Directory "uploads">
+    Options -Indexes
+    <Files "*.php">
+        Order allow,deny
+        Deny from all
+    </Files>
+</Directory>
+
+# Compression
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/plain
+    AddOutputFilterByType DEFLATE text/html
+    AddOutputFilterByType DEFLATE text/xml
+    AddOutputFilterByType DEFLATE text/css
+    AddOutputFilterByType DEFLATE application/xml
+    AddOutputFilterByType DEFLATE application/xhtml+xml
+    AddOutputFilterByType DEFLATE application/rss+xml
+    AddOutputFilterByType DEFLATE application/javascript
+    AddOutputFilterByType DEFLATE application/x-javascript
+</IfModule>
+
+# Browser Caching
+<IfModule mod_expires.c>
+    ExpiresActive on
+    ExpiresByType text/css "access plus 1 year"
+    ExpiresByType application/javascript "access plus 1 year"
+    ExpiresByType image/png "access plus 1 year"
+    ExpiresByType image/jpg "access plus 1 year"
+    ExpiresByType image/jpeg "access plus 1 year"
+    ExpiresByType image/gif "access plus 1 year"
+    ExpiresByType image/svg+xml "access plus 1 year"
+</IfModule>

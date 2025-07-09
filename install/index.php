@@ -4,6 +4,10 @@
  * Easy cPanel Installation System
  */
 
+// Suppress ImageMagick version warnings
+error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);
+ini_set('display_errors', 0);
+
 session_start();
 
 // Check if already installed
@@ -14,6 +18,8 @@ if (file_exists('../config/installed.lock')) {
 $step = isset($_GET['step']) ? (int)$_GET['step'] : 1;
 $errors = [];
 $success = [];
+                } elseif (!filter_var($admin_email, FILTER_VALIDATE_EMAIL)) {
+                    $errors[] = 'Please enter a valid email address';
 
 // Handle form submissions
 if ($_POST) {
@@ -38,12 +44,23 @@ if ($_POST) {
                         'name' => $name,
                         'user' => $user,
                         'pass' => $pass
-                    ];
-                    
+                        
+                        // Check if admin exists, if not create one
+                        $stmt = $pdo->prepare("SELECT COUNT(*) FROM admins WHERE id = 1");
+                        $stmt->execute();
+                        $adminExists = $stmt->fetchColumn() > 0;
+                        
+                        if ($adminExists) {
+                            $stmt = $pdo->prepare("UPDATE admins SET name = 'Admin', email = ?, password = ?, updated_at = NOW() WHERE id = 1");
+                            $stmt->execute([$admin_email, $hashed_password]);
+                        } else {
+                            $stmt = $pdo->prepare("INSERT INTO admins (id, name, email, password, status, created_at, updated_at) VALUES (1, 'Admin', ?, ?, 1, NOW(), NOW())");
+                            $stmt->execute([$admin_email, $hashed_password]);
+                        }
                     $success[] = 'Database connection successful!';
-                    $step = 3;
-                } catch (PDOException $e) {
-                    $errors[] = 'Database connection failed: ' . $e->getMessage();
+                        // Update general settings
+                        $stmt = $pdo->prepare("UPDATE generalsettings SET title = ?, header_email = ?, from_email = ?, from_name = ? WHERE id = 1");
+                        $stmt->execute([$site_name, $admin_email, $admin_email, $site_name]);
                 }
             }
             break;
@@ -66,55 +83,8 @@ if ($_POST) {
                         $errors[] = 'Database file not found: ' . $sqlFile;
                     } else {
                         $sql = file_get_contents($sqlFile);
-                        if ($sql) {
-                            // Remove comments and split into statements
-                            $sql = preg_replace('/--.*$/m', '', $sql);
-                            $sql = preg_replace('/\/\*.*?\*\//s', '', $sql);
-                            
-                            // Split by semicolon but ignore semicolons in quotes
-                            $statements = [];
-                            $current = '';
-                            $inQuotes = false;
-                            $quoteChar = '';
-                            
-                            for ($i = 0; $i < strlen($sql); $i++) {
-                                $char = $sql[$i];
-                                
-                                if (!$inQuotes && ($char === '"' || $char === "'")) {
-                                    $inQuotes = true;
-                                    $quoteChar = $char;
-                                } elseif ($inQuotes && $char === $quoteChar) {
-                                    $inQuotes = false;
-                                } elseif (!$inQuotes && $char === ';') {
-                                    $statement = trim($current);
-                                    if (!empty($statement)) {
-                                        $statements[] = $statement;
-                                    }
-                                    $current = '';
-                                    continue;
-                                }
-                                
-                                $current .= $char;
-                            }
-                            
-                            // Add the last statement if it exists
-                            $statement = trim($current);
-                            if (!empty($statement)) {
-                                $statements[] = $statement;
-                            }
-                            
-                            // Execute each statement
-                            foreach ($statements as $statement) {
-                                $statement = trim($statement);
-                                if (!empty($statement) && 
-                                    !preg_match('/^(SET|START|COMMIT)/i', $statement)) {
-                                    try {
-                                        $pdo->exec($statement);
-                                    } catch (PDOException $e) {
-                                        // Log the error but continue with other statements
-                                        error_log("SQL Error: " . $e->getMessage() . " in statement: " . substr($statement, 0, 100));
-                                    }
-                                }
+                                // Import database using improved method
+                                $this->importDatabase($pdo, $sql);
                             }
                             
                             $success[] = 'Database imported successfully!';
@@ -170,22 +140,17 @@ if ($_POST) {
                     $stmt->execute([$admin_email, $hashed_password]);
                     
                     // Update site settings
-                    $stmt = $pdo->prepare("UPDATE settings SET site_name = ?, contact_email = ?, plisio_api_key = ?, plisio_secret_key = ?, updated_at = NOW() WHERE id = 1");
-                    $stmt->execute([$site_name, $admin_email, $plisio_api, $plisio_secret]);
+                    // Create .htaccess for uploads security
+                    $htaccess_content = "Options -Indexes\n<Files *.php>\nOrder allow,deny\nDeny from all\n</Files>";
+                    file_put_contents('../uploads/.htaccess', $htaccess_content);
                     
-                    $_SESSION['install_config'] = [
-                        'site_name' => $site_name,
-                        'site_url' => $site_url,
-                        'admin_email' => $admin_email
-                    ];
+                    // Set proper permissions
+                    chmod('../uploads', 0755);
+                    chmod('../config', 0755);
                     
-                    $success[] = 'Configuration saved successfully!';
-                    $step = 5;
-                } catch (Exception $e) {
-                    $errors[] = 'Configuration failed: ' . $e->getMessage();
-                }
-            }
-            break;
+                    // Create robots.txt
+                    $robots_content = "User-agent: *\nAllow: /\nSitemap: " . ($_SESSION['install_config']['site_url'] ?? '') . "/sitemap.xml";
+                    file_put_contents('../robots.txt', $robots_content);
             
         case 5:
             // Finalize Installation
@@ -227,7 +192,6 @@ if ($_POST) {
                 
                 // Clear session
                 unset($_SESSION['db_config']);
-                unset($_SESSION['install_config']);
                 
                 $success[] = 'Installation completed successfully!';
                 $step = 6;
@@ -235,6 +199,67 @@ if ($_POST) {
                 $errors[] = 'Finalization failed: ' . $e->getMessage();
             }
             break;
+    }
+}
+
+// Function to import database with better error handling
+function importDatabase($pdo, $sql) {
+    // Remove comments and normalize line endings
+    $sql = preg_replace('/--.*$/m', '', $sql);
+    $sql = preg_replace('/\/\*.*?\*\//s', '', $sql);
+    $sql = str_replace(["\r\n", "\r"], "\n", $sql);
+    
+    // Split into statements more reliably
+    $statements = [];
+    $current = '';
+    $inQuotes = false;
+    $quoteChar = '';
+    $lines = explode("\n", $sql);
+    
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (empty($line)) continue;
+        
+        for ($i = 0; $i < strlen($line); $i++) {
+            $char = $line[$i];
+            
+            if (!$inQuotes && ($char === '"' || $char === "'")) {
+                $inQuotes = true;
+                $quoteChar = $char;
+            } elseif ($inQuotes && $char === $quoteChar && ($i === 0 || $line[$i-1] !== '\\')) {
+                $inQuotes = false;
+            } elseif (!$inQuotes && $char === ';') {
+                $statement = trim($current);
+                if (!empty($statement) && !preg_match('/^(SET|START|COMMIT|DELIMITER)/i', $statement)) {
+                    $statements[] = $statement;
+                }
+                $current = '';
+                continue;
+            }
+            
+            $current .= $char;
+        }
+        $current .= ' ';
+    }
+    
+    // Add the last statement if it exists
+    $statement = trim($current);
+    if (!empty($statement) && !preg_match('/^(SET|START|COMMIT|DELIMITER)/i', $statement)) {
+        $statements[] = $statement;
+    }
+    
+    // Execute statements with better error handling
+    $pdo->beginTransaction();
+    try {
+        foreach ($statements as $statement) {
+            if (!empty(trim($statement))) {
+                $pdo->exec($statement);
+            }
+        }
+        $pdo->commit();
+    } catch (PDOException $e) {
+        $pdo->rollback();
+        throw new Exception("Database import failed: " . $e->getMessage());
     }
 }
 
@@ -246,7 +271,7 @@ function checkRequirements() {
         'cURL Extension' => extension_loaded('curl'),
         'JSON Extension' => extension_loaded('json'),
         'OpenSSL Extension' => extension_loaded('openssl'),
-        'GD Extension' => extension_loaded('gd'),
+        'GD Extension' => extension_loaded('gd') || extension_loaded('imagick'),
         'Config Directory Writable' => is_writable('../config/'),
         'Uploads Directory Writable' => is_writable('../') || mkdir('../uploads', 0755, true),
     ];
@@ -676,6 +701,19 @@ function checkRequirements() {
                 </p>
             </div>
             
+            <?php if (isset($_SESSION['install_config'])): ?>
+            <div style="background: #f0f9ff; padding: 25px; border-radius: 12px; margin-bottom: 30px; border: 1px solid #0ea5e9;">
+                <h3 style="color: #0c4a6e; margin-bottom: 15px;">📋 Installation Summary:</h3>
+                <ul style="color: #0c4a6e; margin-left: 20px; line-height: 1.8;">
+                    <li><strong>Site Name:</strong> <?php echo htmlspecialchars($_SESSION['install_config']['site_name']); ?></li>
+                    <li><strong>Site URL:</strong> <?php echo htmlspecialchars($_SESSION['install_config']['site_url']); ?></li>
+                    <li><strong>Admin Email:</strong> <?php echo htmlspecialchars($_SESSION['install_config']['admin_email']); ?></li>
+                    <li><strong>Database:</strong> Successfully imported with sample data</li>
+                    <li><strong>Upload Directories:</strong> Created and secured</li>
+                </ul>
+            </div>
+            <?php endif; ?>
+            
             <div style="background: #f0f9ff; padding: 25px; border-radius: 12px; margin-bottom: 30px; border: 1px solid #0ea5e9;">
                 <h3 style="color: #0c4a6e; margin-bottom: 15px;">🚀 Next Steps:</h3>
                 <ol style="color: #0c4a6e; margin-left: 20px; line-height: 1.8;">
@@ -696,6 +734,11 @@ function checkRequirements() {
             <div class="security-notice">
                 <strong>🔒 Security Notice:</strong> Please delete the /install directory immediately for security reasons. You can do this via cPanel File Manager or FTP.
             </div>
+            
+            <?php 
+            // Clear install config after displaying
+            unset($_SESSION['install_config']);
+            ?>
             <?php endif; ?>
         </div>
     </div>

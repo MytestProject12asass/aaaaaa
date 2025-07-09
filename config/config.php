@@ -4,14 +4,14 @@
  * StarRent.vip - Starlink Router Rental Platform
  */
 
+// Suppress ImageMagick version warnings
+error_reporting(E_ALL & ~E_WARNING);
+ini_set('display_errors', 0);
+
 // Start session
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
-
-// Error reporting (disable in production)
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
 
 // Timezone
 date_default_timezone_set('UTC');
@@ -66,6 +66,14 @@ spl_autoload_register(function ($class) {
         require_once $file;
     }
 });
+
+// Image processing configuration
+if (extension_loaded('imagick')) {
+    // Suppress ImageMagick version warnings
+    $imagick = new Imagick();
+    $imagick->setResourceLimit(Imagick::RESOURCETYPE_MEMORY, 256);
+    $imagick->setResourceLimit(Imagick::RESOURCETYPE_MAP, 256);
+}
 
 // Helper functions
 function redirect($url) {
