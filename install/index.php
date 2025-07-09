@@ -55,32 +55,49 @@ if ($_POST) {
                             $stmt->execute([$admin_email, $hashed_password]);
                         } else {
                             $stmt = $pdo->prepare("INSERT INTO admins (id, name, email, password, status, created_at, updated_at) VALUES (1, 'Admin', ?, ?, 1, NOW(), NOW())");
-                            $stmt->execute([$admin_email, $hashed_password]);
-                        }
-                    $success[] = 'Database connection successful!';
-                        // Update general settings
-                        $stmt = $pdo->prepare("UPDATE generalsettings SET title = ?, header_email = ?, from_email = ?, from_name = ? WHERE id = 1");
-                        $stmt->execute([$site_name, $admin_email, $admin_email, $site_name]);
-                }
-            }
-            break;
-            
-        case 3:
-            // Import Database
-            if (!isset($_SESSION['db_config'])) {
-                $errors[] = 'Database configuration not found. Please go back to step 2.';
-                $step = 2;
-            } else {
-                try {
                     $config = $_SESSION['db_config'];
                     $pdo = new PDO("mysql:host={$config['host']};dbname={$config['name']};charset=utf8mb4", 
                                    $config['user'], $config['pass']);
                     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
                     
+                    // Update database configuration file
+                    $db_config = file_get_contents('../config/database.php');
+                    $db_config = str_replace('your_db_username', $config['user'], $db_config);
+                    $db_config = str_replace('your_db_password', $config['pass'], $db_config);
+                    $db_config = str_replace('your_db_name', $config['name'], $db_config);
+                    $db_config = str_replace('localhost', $config['host'], $db_config);
+                    file_put_contents('../config/database.php', $db_config);
+                    
+                    // Update main configuration
+                    $main_config = file_get_contents('../config/config.php');
+                    $main_config = str_replace('https://star-rent.vip', rtrim($site_url, '/'), $main_config);
+                    $main_config = str_replace('your_plisio_api_key', $plisio_api, $main_config);
+                    $main_config = str_replace('your_plisio_secret_key', $plisio_secret, $main_config);
+                    file_put_contents('../config/config.php', $main_config);
+                    
+                    // Update or create admin user
                     // Read SQL file
                     $sqlFile = '../database/starlink_rental.sql';
-                    if (!file_exists($sqlFile)) {
-                        $errors[] = 'Database file not found: ' . $sqlFile;
+                        // Import database using transaction
+                        $pdo->beginTransaction();
+                        try {
+                            // Split SQL into statements
+                            $statements = $this->splitSqlStatements($sql);
+                            
+                            foreach ($statements as $statement) {
+                                $statement = trim($statement);
+                                if (!empty($statement)) {
+                                    $pdo->exec($statement);
+                                }
+                            }
+                            
+                            $pdo->commit();
+                            $success[] = 'Database imported successfully!';
+                            $step = 4;
+                        } catch (PDOException $e) {
+                            $pdo->rollback();
+                            $errors[] = 'Database import failed: ' . $e->getMessage();
+                        }
                     } else {
                         $sql = file_get_contents($sqlFile);
                                 // Import database using improved method
@@ -136,21 +153,37 @@ if ($_POST) {
                     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
                     
                     $hashed_password = password_hash($admin_password, PASSWORD_DEFAULT);
-                    $stmt = $pdo->prepare("UPDATE admins SET email = ?, password = ?, updated_at = NOW() WHERE id = 1");
-                    $stmt->execute([$admin_email, $hashed_password]);
                     
-                    // Update site settings
-                    // Create .htaccess for uploads security
-                    $htaccess_content = "Options -Indexes\n<Files *.php>\nOrder allow,deny\nDeny from all\n</Files>";
-                    file_put_contents('../uploads/.htaccess', $htaccess_content);
+                    // Check if admin exists
+                    $stmt = $pdo->prepare("SELECT COUNT(*) FROM admins WHERE id = 1");
+                    $stmt->execute();
+                    $adminExists = $stmt->fetchColumn() > 0;
                     
-                    // Set proper permissions
-                    chmod('../uploads', 0755);
-                    chmod('../config', 0755);
+                    if ($adminExists) {
+                        $stmt = $pdo->prepare("UPDATE admins SET name = 'Admin', email = ?, password = ?, updated_at = NOW() WHERE id = 1");
+                        $stmt->execute([$admin_email, $hashed_password]);
+                    } else {
+                        $stmt = $pdo->prepare("INSERT INTO admins (id, name, email, password, status, created_at, updated_at) VALUES (1, 'Admin', ?, ?, 1, NOW(), NOW())");
+                        $stmt->execute([$admin_email, $hashed_password]);
+                    }
                     
-                    // Create robots.txt
-                    $robots_content = "User-agent: *\nAllow: /\nSitemap: " . ($_SESSION['install_config']['site_url'] ?? '') . "/sitemap.xml";
-                    file_put_contents('../robots.txt', $robots_content);
+                    // Update general settings
+                    $stmt = $pdo->prepare("UPDATE generalsettings SET title = ?, header_email = ?, from_email = ?, from_name = ?, updated_at = NOW() WHERE id = 1");
+                    $stmt->execute([$site_name, $admin_email, $admin_email, $site_name]);
+                    
+                    $_SESSION['install_config'] = [
+                        'site_name' => $site_name,
+                        'site_url' => $site_url,
+                        'admin_email' => $admin_email
+                    ];
+                    
+                    $success[] = 'Configuration saved successfully!';
+                    $step = 5;
+                } catch (Exception $e) {
+                    $errors[] = 'Configuration failed: ' . $e->getMessage();
+                }
+            }
+            break;
             
         case 5:
             // Finalize Installation
@@ -169,6 +202,18 @@ if ($_POST) {
                         mkdir($dir, 0755, true);
                     }
                 }
+            
+            // Create .htaccess for uploads security
+            $htaccess_content = "Options -Indexes\n<Files *.php>\nOrder allow,deny\nDeny from all\n</Files>";
+            file_put_contents('../uploads/.htaccess', $htaccess_content);
+            
+            // Set proper permissions
+            chmod('../uploads', 0755);
+            chmod('../config', 0755);
+            
+            // Create robots.txt
+            $robots_content = "User-agent: *\nAllow: /\nSitemap: " . ($_SESSION['install_config']['site_url'] ?? '') . "/sitemap.xml";
+            file_put_contents('../robots.txt', $robots_content);
                 
                 // Create sample router images (placeholder)
                 $sample_images = [
@@ -202,65 +247,41 @@ if ($_POST) {
     }
 }
 
-// Function to import database with better error handling
-function importDatabase($pdo, $sql) {
-    // Remove comments and normalize line endings
+// Function to split SQL statements properly
+function splitSqlStatements($sql) {
+    // Remove comments
     $sql = preg_replace('/--.*$/m', '', $sql);
     $sql = preg_replace('/\/\*.*?\*\//s', '', $sql);
-    $sql = str_replace(["\r\n", "\r"], "\n", $sql);
     
-    // Split into statements more reliably
+    // Split by DELIMITER statements first
+    $parts = preg_split('/DELIMITER\s+(.+)/i', $sql, -1, PREG_SPLIT_DELIM_CAPTURE);
+    
     $statements = [];
-    $current = '';
-    $inQuotes = false;
-    $quoteChar = '';
-    $lines = explode("\n", $sql);
+    $delimiter = ';';
     
-    foreach ($lines as $line) {
-        $line = trim($line);
-        if (empty($line)) continue;
+    for ($i = 0; $i < count($parts); $i++) {
+        if ($i % 2 == 1) {
+            // This is a delimiter definition
+            $delimiter = trim($parts[$i]);
+            continue;
+        }
         
-        for ($i = 0; $i < strlen($line); $i++) {
-            $char = $line[$i];
-            
-            if (!$inQuotes && ($char === '"' || $char === "'")) {
-                $inQuotes = true;
-                $quoteChar = $char;
-            } elseif ($inQuotes && $char === $quoteChar && ($i === 0 || $line[$i-1] !== '\\')) {
-                $inQuotes = false;
-            } elseif (!$inQuotes && $char === ';') {
-                $statement = trim($current);
-                if (!empty($statement) && !preg_match('/^(SET|START|COMMIT|DELIMITER)/i', $statement)) {
-                    $statements[] = $statement;
-                }
-                $current = '';
-                continue;
-            }
-            
-            $current .= $char;
-        }
-        $current .= ' ';
-    }
-    
-    // Add the last statement if it exists
-    $statement = trim($current);
-    if (!empty($statement) && !preg_match('/^(SET|START|COMMIT|DELIMITER)/i', $statement)) {
-        $statements[] = $statement;
-    }
-    
-    // Execute statements with better error handling
-    $pdo->beginTransaction();
-    try {
-        foreach ($statements as $statement) {
-            if (!empty(trim($statement))) {
-                $pdo->exec($statement);
+        $part = $parts[$i];
+        if (empty(trim($part))) continue;
+        
+        // Split by current delimiter
+        $subStatements = explode($delimiter, $part);
+        
+        foreach ($subStatements as $statement) {
+            $statement = trim($statement);
+            if (!empty($statement) && 
+                !preg_match('/^(SET\s+(SQL_MODE|AUTOCOMMIT|time_zone)|START\s+TRANSACTION|COMMIT)/i', $statement)) {
+                $statements[] = $statement;
             }
         }
-        $pdo->commit();
-    } catch (PDOException $e) {
-        $pdo->rollback();
-        throw new Exception("Database import failed: " . $e->getMessage());
     }
+    
+    return $statements;
 }
 
 // System requirements check
